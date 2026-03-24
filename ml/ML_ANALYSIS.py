@@ -497,9 +497,64 @@ print("""
 
 summary_df.to_csv(os.path.join(RESULTS_DIR, 'summary.csv'), index=False)
 
+# ============================================================================
+# FEATURE IMPORTANCE ANALYSIS
+# ============================================================================
+
+print("\n[STEP 6] Generating feature importance analysis...")
+
+feature_importance_data = []
+
+# Train XGBoost models and extract feature importance
+for horizon, (features, gap) in [('1d', (FEATURES_1D, 1)), ('5d', (FEATURES_5D, 5)), ('22d', (FEATURES_22D, 22))]:
+    y_train = train_df[f'y_{horizon}'].values
+    X_train = train_df[features].values
+
+    scaler = StandardScaler()
+    X_train_scaled = scaler.fit_transform(X_train)
+
+    # Train XGBoost to get feature importance
+    params = BEST_PARAMS[horizon]['XGB']
+    model = xgb.XGBRegressor(**params, random_state=42, verbosity=0)
+    model.fit(X_train_scaled, y_train)
+
+    # Get feature importance
+    importance = model.feature_importances_
+
+    for i, feat in enumerate(features):
+        feature_importance_data.append({
+            'Horizon': horizon,
+            'Feature': feat,
+            'Importance': importance[i],
+            'Rank': 0  # Will be filled later
+        })
+
+# Create DataFrame and rank features
+importance_df = pd.DataFrame(feature_importance_data)
+
+# Rank features within each horizon
+for horizon in ['1d', '5d', '22d']:
+    mask = importance_df['Horizon'] == horizon
+    horizon_df = importance_df[mask].sort_values('Importance', ascending=False)
+    importance_df.loc[mask, 'Rank'] = range(1, mask.sum() + 1)
+
+# Sort by horizon and importance
+importance_df = importance_df.sort_values(['Horizon', 'Importance'], ascending=[True, False])
+importance_df.to_csv(os.path.join(RESULTS_DIR, 'feature_importance.csv'), index=False)
+
+print("\n  Feature Importance Summary (XGBoost):")
+print(f"\n  {'Horizon':<8} {'Top 3 Features':<50}")
+print(f"  {'-'*60}")
+
+for horizon in ['1d', '5d', '22d']:
+    top3 = importance_df[(importance_df['Horizon'] == horizon)].head(3)
+    top3_str = ', '.join([f"{row['Feature']} ({row['Importance']:.3f})" for _, row in top3.iterrows()])
+    print(f"  {horizon:<8} {top3_str}")
+
 print("\n" + "=" * 100)
 print(f"ANALYSIS COMPLETE: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
 print("=" * 100)
 print("\nGenerated files:")
 print("  - results/final_model_comparison.csv")
 print("  - results/summary.csv")
+print("  - results/feature_importance.csv")

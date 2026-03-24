@@ -389,9 +389,8 @@ def process_stock_data(df_raw):
 
     df = df.sort_values('Date').reset_index(drop=True)
 
-    # Calculate returns using shifted Last_Price (not Prev_Close which has zero values)
-    df['Simple_Return'] = df['Last_Price'].pct_change()
-    df['Log_Return'] = np.log(df['Last_Price'] / df['Last_Price'].shift(1))
+    # NOTE: Returns are calculated AFTER concatenation to avoid NaN at each OPEX boundary
+    # See consolidation section below
 
     return df
 
@@ -514,6 +513,11 @@ def main():
 
         df_all_stock = pd.concat(all_stock_data, ignore_index=True)
         df_all_stock = df_all_stock.sort_values('Date').drop_duplicates(subset=['Date'], keep='last').reset_index(drop=True)
+
+        # Calculate returns AFTER concatenation to avoid NaN at each OPEX boundary
+        # This way, only the first observation has NaN (no previous day to compute return)
+        df_all_stock['Simple_Return'] = df_all_stock['Last_Price'].pct_change()
+        df_all_stock['Log_Return'] = np.log(df_all_stock['Last_Price'] / df_all_stock['Last_Price'].shift(1))
 
         print(f"\nTotal stock records before adjustment: {len(df_all_stock)}")
         print(f"Date range: {df_all_stock['Date'].min().date()} to {df_all_stock['Date'].max().date()}")

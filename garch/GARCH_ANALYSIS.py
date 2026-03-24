@@ -75,10 +75,10 @@ Type: Daily closing prices and returns
 
 The data contains:
 - Date: Trading date
-- Last_Price: GGAL closing price (ARS)
-- Simple_Return: (P_t / P_{t-1}) - 1
-- Log_Return: log(P_t / P_{t-1})
-- Adj_Price: Dividend-adjusted price
+- Last_Price: GGAL closing price (ARS) - unadjusted
+- Adj_Price: Dividend-adjusted price (used for return calculations)
+- Simple_Return: (Adj_P_t / Adj_P_{t-1}) - 1
+- Log_Return: log(Adj_P_t / Adj_P_{t-1})
 
 1.2 RETURN TYPES
 ----------------
@@ -101,6 +101,11 @@ df = pd.read_csv(DATA_FILE)
 df['Date'] = pd.to_datetime(df['Date'])
 df = df.sort_values('Date').reset_index(drop=True)
 
+# Calculate returns on ADJUSTED prices to capture total return including dividends
+# This ensures dividend days reflect true economic return, not artificial price drop
+df['Simple_Return'] = df['Adj_Price'].pct_change()
+df['Log_Return'] = np.log(df['Adj_Price'] / df['Adj_Price'].shift(1))
+
 log(f"""
 1.3 DATA SUMMARY
 ----------------
@@ -108,8 +113,10 @@ Period: {df['Date'].min().strftime('%Y-%m-%d')} to {df['Date'].max().strftime('%
 Total observations: {len(df)} trading days
 Years covered: {df['Date'].min().year} - {df['Date'].max().year}
 
+Note: Returns calculated on Adj_Price (dividend-adjusted) for accurate total return.
+
 Sample of data:
-{df[['Date', 'Last_Price', 'Simple_Return', 'Log_Return']].head(5).to_string(index=False)}
+{df[['Date', 'Adj_Price', 'Simple_Return', 'Log_Return']].head(5).to_string(index=False)}
 """)
 
 # =============================================================================

@@ -52,7 +52,8 @@ COMMISSION_OPTIONS = 0.002  # 0.2% per option trade
 COMMISSION_STOCK = 0.0005 * 1.21  # 0.05% + 21% VAT
 MIN_DAYS_TO_EXPIRY = 7  # Roll to next OPEX if less than this
 MIN_VOLUME = 500
-LOTE_SIZE = 100
+NUM_LOTES = 100  # Number of lots to trade
+LOTE_SIZE = 100 * NUM_LOTES  # 100 options per lot × 100 lots = 10,000 options
 GAMMA_ROLL_THRESHOLD = 0.50  # Roll when gamma < 50% of ATM gamma
 DELTA_UPPER_BOUND = 0.85  # Roll when delta > this (option too ITM)
 DELTA_LOWER_BOUND = 0.15  # Roll when delta < this (option too OTM)
@@ -360,6 +361,7 @@ def run_gamma_scalping_strategy(df, df_options, option_type='CALL'):
 
     all_trades = []
     hedge_log = []
+    daily_pnl_log = []  # Track daily P&L for portfolio evolution
 
     for opex in opex_cycles:
         print(f"\n  Processing OPEX {opex}...")
@@ -395,6 +397,14 @@ def run_gamma_scalping_strategy(df, df_options, option_type='CALL'):
         prev_date = None
         prev_stock = None
         trade_count = 0
+
+        # Per-cycle tracking for correct return calculation
+        cycle_returns = []  # List of returns per cycle
+        cycle_start_option_pnl = 0
+        cycle_start_hedge_pnl = 0
+        cycle_start_financing_pnl = 0
+        cycle_start_commission = 0
+        cycle_capital = None  # Capital committed for current cycle
 
         for idx, (_, row) in enumerate(opex_df.iterrows()):
             current_date = row['Date']
@@ -454,6 +464,14 @@ def run_gamma_scalping_strategy(df, df_options, option_type='CALL'):
 
                 total_commission += current_entry_price * LOTE_SIZE * COMMISSION_OPTIONS
                 total_commission += abs(hedge_shares) * stock_price * COMMISSION_STOCK  # Initial hedge commission
+
+                # Capture cycle capital (for each new cycle)
+                cycle_capital = abs(cash_position)
+                # Track starting P&L values for this cycle
+                cycle_start_option_pnl = option_pnl
+                cycle_start_hedge_pnl = hedge_pnl
+                cycle_start_financing_pnl = financing_pnl
+                cycle_start_commission = total_commission
 
                 hedge_log.append({
                     'Date': current_date,
@@ -581,6 +599,16 @@ def run_gamma_scalping_strategy(df, df_options, option_type='CALL'):
                     'Net_PnL': option_pnl + hedge_pnl + financing_pnl - total_commission
                 })
 
+                # Calculate cycle return (P&L for this cycle / cycle capital)
+                if cycle_capital is not None and cycle_capital > 0:
+                    cycle_option_pnl = option_pnl - cycle_start_option_pnl
+                    cycle_hedge_pnl = hedge_pnl - cycle_start_hedge_pnl
+                    cycle_financing_pnl = financing_pnl - cycle_start_financing_pnl
+                    cycle_commission = total_commission - cycle_start_commission
+                    cycle_pnl = cycle_option_pnl + cycle_hedge_pnl + cycle_financing_pnl - cycle_commission
+                    cycle_return = cycle_pnl / cycle_capital
+                    cycle_returns.append(cycle_return)
+
                 # Check for new signal
                 new_signal = row.get('Signal_A', None)
 
@@ -643,6 +671,20 @@ def run_gamma_scalping_strategy(df, df_options, option_type='CALL'):
                 total_commission += current_entry_price * LOTE_SIZE * COMMISSION_OPTIONS
                 total_commission += abs(hedge_shares) * stock_price * COMMISSION_STOCK  # New hedge commission after roll
 
+                # Capture new cycle capital
+                # Calculate capital for this new cycle: premium + hedge cost
+                if current_position == 'LONG':
+                    new_cycle_premium = current_entry_price * LOTE_SIZE
+                else:
+                    new_cycle_premium = current_entry_price * LOTE_SIZE  # Premium received but also margin required
+                new_cycle_hedge_cost = abs(hedge_shares * stock_price)
+                cycle_capital = new_cycle_premium + new_cycle_hedge_cost
+                # Track starting P&L values for this new cycle
+                cycle_start_option_pnl = option_pnl
+                cycle_start_hedge_pnl = hedge_pnl
+                cycle_start_financing_pnl = financing_pnl
+                cycle_start_commission = total_commission
+
                 hedge_log.append({
                     'Date': current_date,
                     'OPEX': target_opex,
@@ -701,6 +743,28 @@ def run_gamma_scalping_strategy(df, df_options, option_type='CALL'):
             prev_date = current_date
             prev_stock = stock_price
 
+            # Record daily MtM for portfolio evolution (only if we have a position)
+            if current_position is not None and opt_price is not None:
+                # Calculate mark-to-market value of the portfolio
+                if current_position == 'LONG':
+                    option_mtm = opt_price * LOTE_SIZE
+                else:
+                    option_mtm = -opt_price * LOTE_SIZE
+
+                hedge_value = hedge_shares * stock_price
+                portfolio_mtm = option_mtm + hedge_value + cash_position
+
+                daily_pnl_log.append({
+                    'Date': current_date,
+                    'OPEX': opex,
+                    'Portfolio_MtM': portfolio_mtm,
+                    'Option_MtM': option_mtm,
+                    'Hedge_Value': hedge_value,
+                    'Cash': cash_position,
+                    'Option_Price': opt_price,
+                    'Stock_Price': stock_price
+                })
+
         # ================================================================
         # End of OPEX - close any remaining position
         # ================================================================
@@ -750,13 +814,26 @@ def run_gamma_scalping_strategy(df, df_options, option_type='CALL'):
                 'Net_PnL': option_pnl + hedge_pnl + financing_pnl - total_commission
             })
 
+            # Calculate return for final cycle
+            if cycle_capital is not None and cycle_capital > 0:
+                cycle_option_pnl = option_pnl - cycle_start_option_pnl
+                cycle_hedge_pnl = hedge_pnl - cycle_start_hedge_pnl
+                cycle_financing_pnl = financing_pnl - cycle_start_financing_pnl
+                cycle_commission = total_commission - cycle_start_commission
+                cycle_pnl = cycle_option_pnl + cycle_hedge_pnl + cycle_financing_pnl - cycle_commission
+                cycle_return = cycle_pnl / cycle_capital
+                cycle_returns.append(cycle_return)
+
         # Record OPEX summary
         total_pnl = option_pnl + hedge_pnl + financing_pnl - total_commission
 
-        # Calculate investment for return
-        if opex_df.iloc[0]['Last_Price'] > 0:
-            investment = opex_df.iloc[0]['Last_Price'] * LOTE_SIZE * MARGIN_RATE  # 100% margin
-            net_return = (total_pnl / investment) * 100 if investment > 0 else 0
+        # Calculate OPEX return by compounding cycle returns
+        if len(cycle_returns) > 0:
+            # Compound returns: (1 + r1) * (1 + r2) * ... - 1
+            compounded_return = 1.0
+            for r in cycle_returns:
+                compounded_return *= (1 + r)
+            net_return = (compounded_return - 1) * 100  # As percentage
         else:
             net_return = 0
 
@@ -768,13 +845,14 @@ def run_gamma_scalping_strategy(df, df_options, option_type='CALL'):
             'Financing_PnL': financing_pnl,
             'Commission': total_commission,
             'Total_PnL': total_pnl,
+            'Num_Cycles': len(cycle_returns),
             'Net_Return': net_return
         })
 
-        print(f"    {opex}: {trade_count} trades, Option={option_pnl:+,.0f}, Hedge={hedge_pnl:+,.0f}, "
+        print(f"    {opex}: {trade_count} trades ({len(cycle_returns)} cycles), Option={option_pnl:+,.0f}, Hedge={hedge_pnl:+,.0f}, "
               f"Finance={financing_pnl:+,.0f}, Total={total_pnl:+,.0f} ({net_return:+.1f}%)")
 
-    return pd.DataFrame(all_trades), pd.DataFrame(hedge_log)
+    return pd.DataFrame(all_trades), pd.DataFrame(hedge_log), pd.DataFrame(daily_pnl_log)
 
 # ============================================================================
 # STRADDLE GAMMA SCALPING STRATEGY
@@ -802,6 +880,7 @@ def run_gamma_scalping_straddle(df, df_options):
 
     all_trades = []
     hedge_log = []
+    daily_pnl_log = []  # Track daily P&L for portfolio evolution
 
     for opex in opex_cycles:
         print(f"\n  Processing OPEX {opex}...")
@@ -835,6 +914,14 @@ def run_gamma_scalping_straddle(df, df_options):
         prev_date = None
         prev_stock = None
         trade_count = 0
+
+        # Per-cycle tracking for correct return calculation
+        cycle_returns = []  # List of returns per cycle
+        cycle_start_option_pnl = 0
+        cycle_start_hedge_pnl = 0
+        cycle_start_financing_pnl = 0
+        cycle_start_commission = 0
+        cycle_capital = None  # Capital committed for current cycle
 
         for idx, (_, row) in enumerate(opex_df.iterrows()):
             current_date = row['Date']
@@ -899,6 +986,14 @@ def run_gamma_scalping_straddle(df, df_options):
 
                 total_commission += straddle_premium * COMMISSION_OPTIONS
                 total_commission += abs(hedge_shares) * stock_price * COMMISSION_STOCK  # Initial hedge commission
+
+                # Capture cycle capital (for each new cycle)
+                cycle_capital = abs(cash_position)
+                # Track starting P&L values for this cycle
+                cycle_start_option_pnl = option_pnl
+                cycle_start_hedge_pnl = hedge_pnl
+                cycle_start_financing_pnl = financing_pnl
+                cycle_start_commission = total_commission
 
                 hedge_log.append({
                     'Date': current_date,
@@ -1018,6 +1113,16 @@ def run_gamma_scalping_straddle(df, df_options):
                     'Net_PnL': option_pnl + hedge_pnl + financing_pnl - total_commission
                 })
 
+                # Calculate cycle return (P&L for this cycle / cycle capital)
+                if cycle_capital is not None and cycle_capital > 0:
+                    cycle_option_pnl = option_pnl - cycle_start_option_pnl
+                    cycle_hedge_pnl = hedge_pnl - cycle_start_hedge_pnl
+                    cycle_financing_pnl = financing_pnl - cycle_start_financing_pnl
+                    cycle_commission = total_commission - cycle_start_commission
+                    cycle_pnl = cycle_option_pnl + cycle_hedge_pnl + cycle_financing_pnl - cycle_commission
+                    cycle_return = cycle_pnl / cycle_capital
+                    cycle_returns.append(cycle_return)
+
                 # Check for new signal and roll
                 new_signal = row.get('Signal_A', None)
 
@@ -1084,6 +1189,15 @@ def run_gamma_scalping_straddle(df, df_options):
                 total_commission += straddle_premium * COMMISSION_OPTIONS
                 total_commission += abs(hedge_shares) * stock_price * COMMISSION_STOCK  # New hedge commission after roll
 
+                # Capture new cycle capital
+                new_cycle_hedge_cost = abs(hedge_shares * stock_price)
+                cycle_capital = straddle_premium + new_cycle_hedge_cost
+                # Track starting P&L values for this new cycle
+                cycle_start_option_pnl = option_pnl
+                cycle_start_hedge_pnl = hedge_pnl
+                cycle_start_financing_pnl = financing_pnl
+                cycle_start_commission = total_commission
+
                 hedge_log.append({
                     'Date': current_date,
                     'OPEX': target_opex,
@@ -1119,6 +1233,29 @@ def run_gamma_scalping_straddle(df, df_options):
 
             prev_date = current_date
             prev_stock = stock_price
+
+            # Record daily MtM for portfolio evolution (only if we have a position)
+            if current_position is not None and call_price is not None and put_price is not None:
+                # Calculate mark-to-market value of the straddle
+                if current_position == 'LONG':
+                    option_mtm = (call_price + put_price) * LOTE_SIZE
+                else:
+                    option_mtm = -(call_price + put_price) * LOTE_SIZE
+
+                hedge_value = hedge_shares * stock_price
+                portfolio_mtm = option_mtm + hedge_value + cash_position
+
+                daily_pnl_log.append({
+                    'Date': current_date,
+                    'OPEX': opex,
+                    'Portfolio_MtM': portfolio_mtm,
+                    'Option_MtM': option_mtm,
+                    'Hedge_Value': hedge_value,
+                    'Cash': cash_position,
+                    'Call_Price': call_price,
+                    'Put_Price': put_price,
+                    'Stock_Price': stock_price
+                })
 
         # End of OPEX - close position
         if current_position is not None:
@@ -1164,12 +1301,26 @@ def run_gamma_scalping_straddle(df, df_options):
                 'Net_PnL': option_pnl + hedge_pnl + financing_pnl - total_commission
             })
 
+            # Calculate return for final cycle
+            if cycle_capital is not None and cycle_capital > 0:
+                cycle_option_pnl = option_pnl - cycle_start_option_pnl
+                cycle_hedge_pnl = hedge_pnl - cycle_start_hedge_pnl
+                cycle_financing_pnl = financing_pnl - cycle_start_financing_pnl
+                cycle_commission = total_commission - cycle_start_commission
+                cycle_pnl = cycle_option_pnl + cycle_hedge_pnl + cycle_financing_pnl - cycle_commission
+                cycle_return = cycle_pnl / cycle_capital
+                cycle_returns.append(cycle_return)
+
         # Record OPEX summary
         total_pnl = option_pnl + hedge_pnl + financing_pnl - total_commission
 
-        if opex_df.iloc[0]['Last_Price'] > 0:
-            investment = opex_df.iloc[0]['Last_Price'] * LOTE_SIZE * MARGIN_RATE  # 100% margin
-            net_return = (total_pnl / investment) * 100 if investment > 0 else 0
+        # Calculate OPEX return by compounding cycle returns
+        if len(cycle_returns) > 0:
+            # Compound returns: (1 + r1) * (1 + r2) * ... - 1
+            compounded_return = 1.0
+            for r in cycle_returns:
+                compounded_return *= (1 + r)
+            net_return = (compounded_return - 1) * 100  # As percentage
         else:
             net_return = 0
 
@@ -1181,13 +1332,14 @@ def run_gamma_scalping_straddle(df, df_options):
             'Financing_PnL': financing_pnl,
             'Commission': total_commission,
             'Total_PnL': total_pnl,
+            'Num_Cycles': len(cycle_returns),
             'Net_Return': net_return
         })
 
-        print(f"    {opex}: {trade_count} trades, Option={option_pnl:+,.0f}, Hedge={hedge_pnl:+,.0f}, "
+        print(f"    {opex}: {trade_count} trades ({len(cycle_returns)} cycles), Option={option_pnl:+,.0f}, Hedge={hedge_pnl:+,.0f}, "
               f"Finance={financing_pnl:+,.0f}, Total={total_pnl:+,.0f} ({net_return:+.1f}%)")
 
-    return pd.DataFrame(all_trades), pd.DataFrame(hedge_log)
+    return pd.DataFrame(all_trades), pd.DataFrame(hedge_log), pd.DataFrame(daily_pnl_log)
 
 
 # ============================================================================
@@ -1212,6 +1364,7 @@ def run_gamma_scalping_strangle(df, df_options):
 
     all_trades = []
     hedge_log = []
+    daily_pnl_log = []  # Track daily P&L for portfolio evolution
 
     for opex in opex_cycles:
         print(f"\n  Processing OPEX {opex}...")
@@ -1245,6 +1398,14 @@ def run_gamma_scalping_strangle(df, df_options):
         prev_date = None
         prev_stock = None
         trade_count = 0
+
+        # Per-cycle tracking for correct return calculation
+        cycle_returns = []  # List of returns per cycle
+        cycle_start_option_pnl = 0
+        cycle_start_hedge_pnl = 0
+        cycle_start_financing_pnl = 0
+        cycle_start_commission = 0
+        cycle_capital = None  # Capital committed for current cycle
 
         def get_otm_strangle_options(date, stock, target_opex):
             """Get OTM call (strike > stock) and OTM put (strike < stock)."""
@@ -1338,6 +1499,14 @@ def run_gamma_scalping_strangle(df, df_options):
 
                 total_commission += strangle_premium * COMMISSION_OPTIONS
                 total_commission += abs(hedge_shares) * stock_price * COMMISSION_STOCK  # Initial hedge commission
+
+                # Capture cycle capital (for each new cycle)
+                cycle_capital = abs(cash_position)
+                # Track starting P&L values for this cycle
+                cycle_start_option_pnl = option_pnl
+                cycle_start_hedge_pnl = hedge_pnl
+                cycle_start_financing_pnl = financing_pnl
+                cycle_start_commission = total_commission
 
                 combined_gamma = (bs_gamma(stock_price, call_strike, T, risk_free, current_iv) +
                                   bs_gamma(stock_price, put_strike, T, risk_free, current_iv))
@@ -1470,6 +1639,16 @@ def run_gamma_scalping_strangle(df, df_options):
                     'Net_PnL': option_pnl + hedge_pnl + financing_pnl - total_commission
                 })
 
+                # Calculate cycle return (P&L for this cycle / cycle capital)
+                if cycle_capital is not None and cycle_capital > 0:
+                    cycle_option_pnl = option_pnl - cycle_start_option_pnl
+                    cycle_hedge_pnl = hedge_pnl - cycle_start_hedge_pnl
+                    cycle_financing_pnl = financing_pnl - cycle_start_financing_pnl
+                    cycle_commission = total_commission - cycle_start_commission
+                    cycle_pnl = cycle_option_pnl + cycle_hedge_pnl + cycle_financing_pnl - cycle_commission
+                    cycle_return = cycle_pnl / cycle_capital
+                    cycle_returns.append(cycle_return)
+
                 # Check for new signal and roll
                 new_signal = row.get('Signal_A', None)
 
@@ -1530,6 +1709,15 @@ def run_gamma_scalping_strangle(df, df_options):
                 total_commission += strangle_premium * COMMISSION_OPTIONS
                 total_commission += abs(hedge_shares) * stock_price * COMMISSION_STOCK  # New hedge commission after roll
 
+                # Capture new cycle capital
+                new_cycle_hedge_cost = abs(hedge_shares * stock_price)
+                cycle_capital = strangle_premium + new_cycle_hedge_cost
+                # Track starting P&L values for this new cycle
+                cycle_start_option_pnl = option_pnl
+                cycle_start_hedge_pnl = hedge_pnl
+                cycle_start_financing_pnl = financing_pnl
+                cycle_start_commission = total_commission
+
                 hedge_log.append({
                     'Date': current_date,
                     'OPEX': target_opex,
@@ -1566,6 +1754,29 @@ def run_gamma_scalping_strangle(df, df_options):
 
             prev_date = current_date
             prev_stock = stock_price
+
+            # Record daily MtM for portfolio evolution (only if we have a position)
+            if current_position is not None and call_price is not None and put_price is not None:
+                # Calculate mark-to-market value of the strangle
+                if current_position == 'LONG':
+                    option_mtm = (call_price + put_price) * LOTE_SIZE
+                else:
+                    option_mtm = -(call_price + put_price) * LOTE_SIZE
+
+                hedge_value = hedge_shares * stock_price
+                portfolio_mtm = option_mtm + hedge_value + cash_position
+
+                daily_pnl_log.append({
+                    'Date': current_date,
+                    'OPEX': opex,
+                    'Portfolio_MtM': portfolio_mtm,
+                    'Option_MtM': option_mtm,
+                    'Hedge_Value': hedge_value,
+                    'Cash': cash_position,
+                    'Call_Price': call_price,
+                    'Put_Price': put_price,
+                    'Stock_Price': stock_price
+                })
 
         # End of OPEX - close position
         if current_position is not None:
@@ -1610,12 +1821,26 @@ def run_gamma_scalping_strangle(df, df_options):
                 'Net_PnL': option_pnl + hedge_pnl + financing_pnl - total_commission
             })
 
+            # Calculate return for final cycle
+            if cycle_capital is not None and cycle_capital > 0:
+                cycle_option_pnl = option_pnl - cycle_start_option_pnl
+                cycle_hedge_pnl = hedge_pnl - cycle_start_hedge_pnl
+                cycle_financing_pnl = financing_pnl - cycle_start_financing_pnl
+                cycle_commission = total_commission - cycle_start_commission
+                cycle_pnl = cycle_option_pnl + cycle_hedge_pnl + cycle_financing_pnl - cycle_commission
+                cycle_return = cycle_pnl / cycle_capital
+                cycle_returns.append(cycle_return)
+
         # Record OPEX summary
         total_pnl = option_pnl + hedge_pnl + financing_pnl - total_commission
 
-        if opex_df.iloc[0]['Last_Price'] > 0:
-            investment = opex_df.iloc[0]['Last_Price'] * LOTE_SIZE * MARGIN_RATE  # 100% margin
-            net_return = (total_pnl / investment) * 100 if investment > 0 else 0
+        # Calculate OPEX return by compounding cycle returns
+        if len(cycle_returns) > 0:
+            # Compound returns: (1 + r1) * (1 + r2) * ... - 1
+            compounded_return = 1.0
+            for r in cycle_returns:
+                compounded_return *= (1 + r)
+            net_return = (compounded_return - 1) * 100  # As percentage
         else:
             net_return = 0
 
@@ -1627,13 +1852,14 @@ def run_gamma_scalping_strangle(df, df_options):
             'Financing_PnL': financing_pnl,
             'Commission': total_commission,
             'Total_PnL': total_pnl,
+            'Num_Cycles': len(cycle_returns),
             'Net_Return': net_return
         })
 
-        print(f"    {opex}: {trade_count} trades, Option={option_pnl:+,.0f}, Hedge={hedge_pnl:+,.0f}, "
+        print(f"    {opex}: {trade_count} trades ({len(cycle_returns)} cycles), Option={option_pnl:+,.0f}, Hedge={hedge_pnl:+,.0f}, "
               f"Finance={financing_pnl:+,.0f}, Total={total_pnl:+,.0f} ({net_return:+.1f}%)")
 
-    return pd.DataFrame(all_trades), pd.DataFrame(hedge_log)
+    return pd.DataFrame(all_trades), pd.DataFrame(hedge_log), pd.DataFrame(daily_pnl_log)
 
 
 # ============================================================================
@@ -1745,25 +1971,25 @@ print("\n[STEP 5] Running gamma scalping strategies...")
 
 # 1. CALL strategy
 print("\n  Running CALL gamma scalping (Model A - RV vs IV)...")
-call_trades, call_hedge_log = run_gamma_scalping_strategy(df, df_options, 'CALL')
+call_trades, call_hedge_log, call_daily_pnl = run_gamma_scalping_strategy(df, df_options, 'CALL')
 call_trades.to_csv(f'{OUTPUT_DIR}/gamma_scalp_call_trades.csv', index=False)
 call_hedge_log.to_csv(f'{OUTPUT_DIR}/gamma_scalp_call_hedge_log.csv', index=False)
 
 # 2. PUT strategy
 print("\n  Running PUT gamma scalping (Model A - RV vs IV)...")
-put_trades, put_hedge_log = run_gamma_scalping_strategy(df, df_options, 'PUT')
+put_trades, put_hedge_log, put_daily_pnl = run_gamma_scalping_strategy(df, df_options, 'PUT')
 put_trades.to_csv(f'{OUTPUT_DIR}/gamma_scalp_put_trades.csv', index=False)
 put_hedge_log.to_csv(f'{OUTPUT_DIR}/gamma_scalp_put_hedge_log.csv', index=False)
 
 # 3. STRADDLE strategy
 print("\n  Running STRADDLE gamma scalping (Model A - RV vs IV)...")
-straddle_trades, straddle_hedge_log = run_gamma_scalping_straddle(df, df_options)
+straddle_trades, straddle_hedge_log, straddle_daily_pnl = run_gamma_scalping_straddle(df, df_options)
 straddle_trades.to_csv(f'{OUTPUT_DIR}/gamma_scalp_straddle_trades.csv', index=False)
 straddle_hedge_log.to_csv(f'{OUTPUT_DIR}/gamma_scalp_straddle_hedge_log.csv', index=False)
 
 # 4. STRANGLE strategy
 print("\n  Running STRANGLE gamma scalping (Model A - RV vs IV)...")
-strangle_trades, strangle_hedge_log = run_gamma_scalping_strangle(df, df_options)
+strangle_trades, strangle_hedge_log, strangle_daily_pnl = run_gamma_scalping_strangle(df, df_options)
 strangle_trades.to_csv(f'{OUTPUT_DIR}/gamma_scalp_strangle_trades.csv', index=False)
 strangle_hedge_log.to_csv(f'{OUTPUT_DIR}/gamma_scalp_strangle_hedge_log.csv', index=False)
 
@@ -1848,5 +2074,192 @@ all_strategies_df.to_csv(f'{OUTPUT_DIR}/gamma_scalp_all_comparison.csv', index=F
 
 for rank, (_, row) in enumerate(all_strategies_df.iterrows(), 1):
     print(f"  {rank}. {row['Strategy']:12s}: {int(row['Trades']):3d} trades, {row['Total_Return']:+.1f}% return, P&L={row['Total_PnL']:+,.0f}")
+
+# ============================================================================
+# GENERATE PORTFOLIO EVOLUTION CHART
+# ============================================================================
+
+print("\n" + "-" * 50)
+print("GENERATING PORTFOLIO EVOLUTION CHART")
+print("-" * 50)
+
+import matplotlib.pyplot as plt
+import matplotlib.dates as mdates
+
+# Initial capital for portfolio evolution
+START_CAPITAL = 1_000_000
+BASELINE_START = pd.Timestamp('2025-02-21')
+
+def build_options_portfolio_from_trades(trades_df, strategy_name, start_capital=START_CAPITAL):
+    """
+    Build portfolio evolution from OPEX trade results.
+    Uses the official Net_Return from each OPEX which is accurate.
+
+    This gives the compound return at each OPEX close date.
+    """
+    if len(trades_df) == 0:
+        return pd.DataFrame()
+
+    # OPEX end dates
+    opex_end_dates = {
+        '2025-04': '2025-04-15',
+        '2025-06': '2025-06-18',
+        '2025-08': '2025-08-13',
+        '2025-10': '2025-10-16',
+        '2025-12': '2025-12-18'
+    }
+
+    results = []
+    compound_multiplier = 1.0
+
+    # Add starting point
+    results.append({
+        'Date': pd.Timestamp('2025-02-21'),
+        'Portfolio_Value': start_capital,
+        'Strategy': strategy_name
+    })
+
+    for _, row in trades_df.iterrows():
+        opex = row['OPEX']
+        opex_return = row['Net_Return'] / 100  # Convert % to decimal
+
+        # Update compound multiplier
+        compound_multiplier = compound_multiplier * (1 + opex_return)
+        portfolio_value = start_capital * compound_multiplier
+
+        end_date = opex_end_dates.get(opex, opex + '-18')
+
+        results.append({
+            'Date': pd.Timestamp(end_date),
+            'Portfolio_Value': portfolio_value,
+            'Strategy': strategy_name
+        })
+
+    return pd.DataFrame(results)
+
+def build_stock_daily_portfolio(df_stock, position_type, start_date, start_capital=START_CAPITAL):
+    """
+    Build daily portfolio value for stock strategies with exact calculations.
+    """
+    df = df_stock[df_stock['Date'] >= start_date].copy()
+    df = df.sort_values('Date').reset_index(drop=True)
+
+    if len(df) == 0:
+        return pd.DataFrame()
+
+    entry_price = df.iloc[0]['Last_Price']
+
+    # For options strategies, we use P&L-based returns
+    # For stock, we need to calculate equivalent P&L
+    # Investment = 100% capital for LONG, 100% margin for SHORT
+
+    results = []
+    cum_financing = 0
+    prev_date = None
+
+    for idx, row in df.iterrows():
+        current_date = row['Date']
+        current_price = row['Last_Price']
+        risk_free = row.get('Risk_Free_Rate', 0.4)
+
+        # Calculate financing
+        if prev_date is not None:
+            calendar_days = (current_date - prev_date).days
+            daily_rate = risk_free / 365
+
+            if position_type == 'LONG':
+                # LONG: need to borrow money, pay interest
+                cum_financing -= start_capital * daily_rate * calendar_days
+            else:
+                # SHORT: receive proceeds that earn interest
+                cum_financing += start_capital * daily_rate * calendar_days
+
+        # Calculate price P&L
+        price_change_pct = (current_price - entry_price) / entry_price
+
+        if position_type == 'LONG':
+            price_pnl = start_capital * price_change_pct
+        else:
+            price_pnl = -start_capital * price_change_pct
+
+        # Total portfolio value
+        portfolio_value = start_capital + price_pnl + cum_financing
+
+        results.append({
+            'Date': current_date,
+            'Portfolio_Value': portfolio_value,
+            'Strategy': f'{position_type}_STOCK'
+        })
+
+        prev_date = current_date
+
+    return pd.DataFrame(results)
+
+portfolios = []
+
+# Options strategies (from trade results with accurate returns)
+for name, trades in [('CALL', call_trades), ('PUT', put_trades),
+                     ('STRADDLE', straddle_trades), ('STRANGLE', strangle_trades)]:
+    if len(trades) > 0:
+        port = build_options_portfolio_from_trades(trades, name, START_CAPITAL)
+        if len(port) > 0:
+            portfolios.append(port)
+            print(f"  {name}: {len(port)} OPEX data points")
+
+# Stock strategies
+for pos_type in ['LONG', 'SHORT']:
+    port = build_stock_daily_portfolio(df, pos_type, BASELINE_START, START_CAPITAL)
+    if len(port) > 0:
+        portfolios.append(port)
+        print(f"  {pos_type}_STOCK: {len(port)} daily data points")
+
+# Combine all portfolios
+if portfolios:
+    all_portfolios = pd.concat(portfolios, ignore_index=True)
+    all_portfolios.to_csv(f'{OUTPUT_DIR}/portfolio_evolution.csv', index=False)
+
+    # Create the chart
+    fig, ax = plt.subplots(figsize=(14, 8))
+
+    # Define colors for each strategy
+    colors = {
+        'STRADDLE': '#2ecc71',    # Green
+        'STRANGLE': '#3498db',    # Blue
+        'PUT': '#9b59b6',         # Purple
+        'CALL': '#e74c3c',        # Red
+        'SHORT_STOCK': '#f39c12', # Orange
+        'LONG_STOCK': '#95a5a6',  # Gray
+    }
+
+    # Plot each strategy
+    for strategy in ['STRADDLE', 'STRANGLE', 'PUT', 'CALL', 'SHORT_STOCK', 'LONG_STOCK']:
+        strat_data = all_portfolios[all_portfolios['Strategy'] == strategy].sort_values('Date')
+        if len(strat_data) > 0:
+            ax.plot(strat_data['Date'], strat_data['Portfolio_Value'] / 1_000_000,
+                   label=strategy, color=colors.get(strategy, 'black'), linewidth=2)
+
+    # Add horizontal line at starting capital
+    ax.axhline(y=1.0, color='black', linestyle='--', alpha=0.5, label='Capital Inicial')
+
+    # Formatting
+    ax.set_xlabel('Fecha', fontsize=12)
+    ax.set_ylabel('Valor del Portfolio (Millones ARS)', fontsize=12)
+    ax.set_title('Evolucion del Portfolio por Estrategia\n(Capital Inicial: 1M ARS)', fontsize=14, fontweight='bold')
+    ax.legend(loc='upper left', fontsize=10)
+    ax.grid(True, alpha=0.3)
+
+    # Format x-axis dates
+    ax.xaxis.set_major_formatter(mdates.DateFormatter('%Y-%m'))
+    ax.xaxis.set_major_locator(mdates.MonthLocator())
+    plt.xticks(rotation=45)
+
+    # Format y-axis
+    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, p: f'{x:.2f}M'))
+
+    plt.tight_layout()
+    plt.savefig(f'{OUTPUT_DIR}/portfolio_evolution.png', dpi=150, bbox_inches='tight')
+    plt.close()
+
+    print(f"\n  Chart saved to: {OUTPUT_DIR}/portfolio_evolution.png")
 
 print(f"\nCompleted: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

@@ -157,46 +157,64 @@ python GARCH_ANALYSIS.py
 6. Realiza pronosticos rolling window fuera de muestra
 7. Genera graficos de diagnostico y tablas comparativas
 
+### Dataset Utilizado
+
+Los modelos GARCH utilizan **unicamente datos diarios** de `data.dat`, sin requerir datos intradiarios ni volatilidad implicita.
+
+| Metrica | Valor |
+|---------|-------|
+| Archivo fuente | `process_data/data.dat` |
+| Columna de precios | **Adj_Price** (ajustado por dividendos) |
+| Observaciones originales | 1,181 dias |
+| Observaciones utilizadas | 1,180 dias |
+| Periodo | 2021-02-22 a 2025-12-18 |
+| Conjunto de entrenamiento | 944 dias (80%) |
+| Conjunto de test | 236 dias (20%) |
+
+**Importante:** Los retornos se calculan sobre el **precio ajustado por dividendos (Adj_Price)** para capturar el rendimiento total del inversor. Esto evita la distorsion artificial que ocurre en los dias ex-dividendo cuando se usan precios sin ajustar (Last_Price), ya que el precio cae por el monto del dividendo pero el retorno real del inversor es cero o positivo.
+
+**Nota:** Solo se pierde 1 observacion (el primer dia, 2021-02-19) porque no hay precio anterior para calcular el retorno. A diferencia de los modelos HAR y ML que requieren datos intradiarios, los modelos GARCH trabajan exclusivamente con retornos diarios.
+
 ### Resultados Principales
 
 #### Comparacion de Modelos
 
 | Modelo | Tipo Retorno | AIC | BIC | Persistencia | Vol. Anualizada |
 |--------|--------------|-----|-----|--------------|-----------------|
-| ARCH(1) | Simple | 4798.12 | 4807.77 | 0.179 | 52.78% |
-| ARCH(1) | Logaritmico | 4780.34 | 4789.99 | 0.171 | 52.18% |
-| GARCH(1,1) | Simple | 4770.79 | 4785.26 | 0.931 | 52.97% |
-| **GARCH(1,1)** | **Logaritmico** | **4752.94** | **4767.42** | **0.937** | **52.26%** |
+| ARCH(1) | Simple | 4923.93 | 4933.63 | 0.184 | 52.98% |
+| ARCH(1) | Logaritmico | 4906.09 | 4915.79 | 0.176 | 52.38% |
+| GARCH(1,1) | Simple | 4896.32 | 4910.87 | 0.939 | 53.29% |
+| **GARCH(1,1)** | **Logaritmico** | **4877.88** | **4892.43** | **0.946** | **52.54%** |
 
 #### Mejor Modelo: GARCH(1,1) con Retornos Logaritmicos
 
 El modelo GARCH(1,1) con retornos logaritmicos es el mejor segun los criterios AIC y BIC.
 
 **Parametros estimados:**
-- omega: 0.6798
-- alpha (efecto ARCH): 0.0764
-- beta (efecto GARCH): 0.8609
-- Persistencia (alpha + beta): 0.937
-- Half-life: 10.7 dias
-- Volatilidad anualizada: 52.26%
+- omega: 0.5867
+- alpha (efecto ARCH): 0.0732
+- beta (efecto GARCH): 0.8732
+- Persistencia (alpha + beta): 0.946
+- Half-life: 12.6 dias
+- Volatilidad anualizada: 52.54%
 
 **Interpretacion:**
-- La alta persistencia (0.937) indica que los shocks de volatilidad tardan aproximadamente 11 dias en reducirse a la mitad
-- El efecto ARCH (0.076) es relativamente bajo, indicando que shocks individuales tienen impacto moderado
-- El efecto GARCH (0.861) es alto, mostrando que la volatilidad pasada es muy predictiva de la volatilidad futura
+- La alta persistencia (0.946) indica que los shocks de volatilidad tardan aproximadamente 12.6 dias en reducirse a la mitad
+- El efecto ARCH (0.073) es relativamente bajo, indicando que shocks individuales tienen impacto moderado
+- El efecto GARCH (0.873) es alto, mostrando que la volatilidad pasada es muy predictiva de la volatilidad futura
 
 #### Por que Retornos Logaritmicos son Preferibles
 
-1. **Mejor ajuste estadistico**: AIC 17.85 puntos menor que retornos simples
-2. **Distribucion mas simetrica**: Sesgo de 0.28 vs 0.63 en retornos simples
+1. **Mejor ajuste estadistico**: AIC 18.44 puntos menor que retornos simples
+2. **Distribucion mas simetrica**: Sesgo de 0.26 vs 0.60 en retornos simples
 3. **Aditividad temporal**: Los retornos log son aditivos en el tiempo
 4. **Estandar academico**: Preferidos en la literatura financiera
 
 #### Pronostico Fuera de Muestra
 
-- Periodo de prueba: 2025-01-02 a 2025-12-18 (231 dias)
-- Correlacion pronostico/realizado (Log): 0.098
-- MSE (Log): 3022.26 vs 3695.66 (Simple)
+- Periodo de prueba: 2025-01-02 a 2025-12-18 (236 dias)
+- Correlacion pronostico/realizado (Log): 0.0956
+- MSE (Log): 2961.75 vs 3622.00 (Simple)
 
 ### Archivos Generados
 
@@ -249,6 +267,30 @@ python HAR_RV.py
 - **3 horizontes de pronostico**: 1 dia, 5 dias, 22 dias
 - **Total**: 60 combinaciones modelo-frecuencia-horizonte
 - **Split train/test**: 80%/20%
+
+### Datasets Utilizados
+
+**Importante:** Para garantizar una comparacion justa entre modelos, TODOS los modelos HAR (con y sin IV) se evaluan sobre el **mismo dataset**, resultado de un inner join entre datos intradiarios y datos de volatilidad implicita.
+
+#### Tamanos de Datasets Originales
+
+| Dataset | Dias Originales | Periodo |
+|---------|-----------------|---------|
+| Intradiario 10 min | 1,105 dias | 2021-07-19 a 2026-01-23 |
+| Intradiario 30 min | 3,421 dias | 2012-01-03 a 2026-01-23 |
+| data.dat (con IV) | 1,181 dias | 2021-02-19 a 2025-12-18 |
+
+#### Datasets Despues del Inner Join con IV
+
+| Frecuencia | Dias Despues de Merge | Train (80%) | Test (20%) |
+|------------|----------------------|-------------|------------|
+| 10 minutos | 1,082 dias | 829 dias | 208 dias |
+| 30 minutos | 1,181 dias | 908 dias | 228 dias |
+
+**Notas:**
+- Los datos de 30 minutos tienen historia desde 2012, pero solo se usan los dias que coinciden con datos de IV (desde febrero 2021)
+- Los datos de 10 minutos comienzan en julio 2021, casi al mismo tiempo que los datos de IV
+- Esta metodologia permite comparar directamente modelos HAR-RV vs HAR-RV-IV sobre exactamente las mismas observaciones
 
 ### Medidas de Volatilidad
 
@@ -354,6 +396,20 @@ python ML_ANALYSIS.py
 6. Compara con baselines HAR-RBV y HAR-RBV-IV
 7. Genera tablas comparativas por horizonte de pronostico
 
+### Dataset Utilizado
+
+El script ML utiliza el mismo inner join que HAR entre datos de 10 minutos y volatilidad implicita:
+
+| Metrica | Valor |
+|---------|-------|
+| Dias totales (despues de merge) | 1,081 dias |
+| Dias limpios (despues de feature engineering) | 993 dias |
+| Periodo | Jul 2021 - Dic 2025 |
+| Conjunto de entrenamiento | 794 dias (80%) |
+| Conjunto de test | 199 dias (20%) |
+
+**Nota:** El dataset es ligeramente menor que HAR porque el feature engineering requiere ventanas de 22 dias y elimina observaciones con valores faltantes.
+
 ### Modelos Evaluados
 
 | Modelo | Tipo | Configuracion |
@@ -418,6 +474,20 @@ python ML_ANALYSIS.py
 - **Features de momentum** (VRP, RV_trend) aportan valor incremental sobre HAR puro
 - **Las mejoras son modestas** (1-3%) pero consistentes en todos los horizontes
 
+### Importancia de Features (XGBoost)
+
+| Rank | Feature | Importancia (1d) | Categoria |
+|------|---------|------------------|-----------|
+| 1 | RV_m | 0.285 | HAR Core |
+| 2 | RV_w | 0.264 | HAR Core |
+| 3 | IV_d | 0.115 | IV |
+| 4 | RBV_d | 0.066 | HAR Core |
+| 5 | RV_d | 0.062 | HAR Core |
+| 6 | RV_cv_5d | 0.036 | Vol-of-Vol |
+| 7 | RV_pctrank | 0.034 | Vol-of-Vol |
+
+**Interpretacion:** Los features HAR de largo plazo (RV_m, RV_w) dominan la prediccion con mas del 50% de la importancia combinada, seguidos por la volatilidad implicita (IV_d).
+
 ### Archivos Generados
 
 ```
@@ -425,7 +495,8 @@ ml/
 ├── ML_ANALYSIS.py                          # Script principal
 └── results/
     ├── final_model_comparison.csv          # Comparacion detallada de todos los modelos
-    └── summary.csv                         # Resumen ejecutivo ML vs HAR
+    ├── summary.csv                         # Resumen ejecutivo ML vs HAR
+    └── feature_importance.csv              # Importancia de features por horizonte
 ```
 
 ---
