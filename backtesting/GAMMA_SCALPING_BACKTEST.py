@@ -52,8 +52,8 @@ COMMISSION_OPTIONS = 0.002  # 0.2% per option trade
 COMMISSION_STOCK = 0.0005 * 1.21  # 0.05% + 21% VAT
 MIN_DAYS_TO_EXPIRY = 7  # Roll to next OPEX if less than this
 MIN_VOLUME = 500
-NUM_LOTES = 100  # Number of lots to trade
-LOTE_SIZE = 100 * NUM_LOTES  # 100 options per lot × 100 lots = 10,000 options
+MAX_EXPOSURE_BUDGET = 1_000_000  # Maximum ARS total exposure (premium + hedge) per cycle
+LOTE_UNIT = 100  # Options per standard lot
 GAMMA_ROLL_THRESHOLD = 0.50  # Roll when gamma < 50% of ATM gamma
 DELTA_UPPER_BOUND = 0.85  # Roll when delta > this (option too ITM)
 DELTA_LOWER_BOUND = 0.15  # Roll when delta < this (option too OTM)
@@ -397,6 +397,7 @@ def run_gamma_scalping_strategy(df, df_options, option_type='CALL'):
         prev_date = None
         prev_stock = None
         trade_count = 0
+        position_size = 0  # Number of options (calculated dynamically per cycle)
 
         # Per-cycle tracking for correct return calculation
         cycle_returns = []  # List of returns per cycle
@@ -443,26 +444,37 @@ def run_gamma_scalping_strategy(df, df_options, option_type='CALL'):
                 current_entry_date = current_date
                 current_iv = atm['iv'] if atm['iv'] and not pd.isna(atm['iv']) else avg_iv
 
-                # Cash flow from option
-                if current_position == 'LONG':
-                    cash_position -= current_entry_price * LOTE_SIZE
-                else:
-                    cash_position += current_entry_price * LOTE_SIZE
-
-                # Calculate initial delta and hedge
+                # Calculate initial delta for position sizing
                 if option_type == 'CALL':
                     delta = bs_delta_call(stock_price, current_strike, T, risk_free, current_iv)
                 else:
                     delta = bs_delta_call(stock_price, current_strike, T, risk_free, current_iv) - 1
 
                 if current_position == 'SHORT':
-                    delta = -delta
+                    position_delta = -delta
+                else:
+                    position_delta = delta
 
-                target_hedge = round(-delta * LOTE_SIZE)
+                # Calculate position size based on max total exposure (premium + hedge)
+                # Exposure per option = premium + |delta| * stock_price
+                exposure_per_option = current_entry_price + abs(position_delta) * stock_price
+                max_options = int(MAX_EXPOSURE_BUDGET / exposure_per_option)
+                position_size = (max_options // LOTE_UNIT) * LOTE_UNIT  # Round to lots
+                if position_size < LOTE_UNIT:
+                    position_size = LOTE_UNIT  # Minimum 1 lot
+
+                # Cash flow from option
+                if current_position == 'LONG':
+                    cash_position -= current_entry_price * position_size
+                else:
+                    cash_position += current_entry_price * position_size
+
+                # Calculate hedge
+                target_hedge = round(-position_delta * position_size)
                 hedge_shares = target_hedge
                 cash_position -= hedge_shares * stock_price
 
-                total_commission += current_entry_price * LOTE_SIZE * COMMISSION_OPTIONS
+                total_commission += current_entry_price * position_size * COMMISSION_OPTIONS
                 total_commission += abs(hedge_shares) * stock_price * COMMISSION_STOCK  # Initial hedge commission
 
                 # Capture cycle capital (for each new cycle)
@@ -567,13 +579,13 @@ def run_gamma_scalping_strategy(df, df_options, option_type='CALL'):
             if should_roll:
                 # Close current position
                 if current_position == 'LONG':
-                    option_pnl += (opt_price - current_entry_price) * LOTE_SIZE
-                    cash_position += opt_price * LOTE_SIZE
+                    option_pnl += (opt_price - current_entry_price) * position_size
+                    cash_position += opt_price * position_size
                 else:
-                    option_pnl += (current_entry_price - opt_price) * LOTE_SIZE
-                    cash_position -= opt_price * LOTE_SIZE
+                    option_pnl += (current_entry_price - opt_price) * position_size
+                    cash_position -= opt_price * position_size
 
-                total_commission += opt_price * LOTE_SIZE * COMMISSION_OPTIONS
+                total_commission += opt_price * position_size * COMMISSION_OPTIONS
 
                 # Close hedge
                 cash_position += hedge_shares * stock_price
@@ -646,13 +658,7 @@ def run_gamma_scalping_strategy(df, df_options, option_type='CALL'):
                 current_entry_date = current_date
                 current_iv = new_atm['iv'] if new_atm['iv'] and not pd.isna(new_atm['iv']) else avg_iv
 
-                # Cash flow from new option
-                if current_position == 'LONG':
-                    cash_position -= current_entry_price * LOTE_SIZE
-                else:
-                    cash_position += current_entry_price * LOTE_SIZE
-
-                # New hedge
+                # New hedge calculation
                 new_days = (get_opex_end_date(target_opex, df_options) - current_date).days
                 new_T = max(new_days, 1) / 365
 
@@ -664,19 +670,32 @@ def run_gamma_scalping_strategy(df, df_options, option_type='CALL'):
                 if current_position == 'SHORT':
                     new_delta = -new_delta
 
-                target_hedge = round(-new_delta * LOTE_SIZE)
+                # Calculate new position size based on max total exposure (premium + hedge)
+                exposure_per_option = current_entry_price + abs(new_delta) * stock_price
+                max_options = int(MAX_EXPOSURE_BUDGET / exposure_per_option)
+                position_size = (max_options // LOTE_UNIT) * LOTE_UNIT
+                if position_size < LOTE_UNIT:
+                    position_size = LOTE_UNIT
+
+                # Cash flow from new option
+                if current_position == 'LONG':
+                    cash_position -= current_entry_price * position_size
+                else:
+                    cash_position += current_entry_price * position_size
+
+                target_hedge = round(-new_delta * position_size)
                 hedge_shares = target_hedge
                 cash_position -= hedge_shares * stock_price
 
-                total_commission += current_entry_price * LOTE_SIZE * COMMISSION_OPTIONS
+                total_commission += current_entry_price * position_size * COMMISSION_OPTIONS
                 total_commission += abs(hedge_shares) * stock_price * COMMISSION_STOCK  # New hedge commission after roll
 
                 # Capture new cycle capital
                 # Calculate capital for this new cycle: premium + hedge cost
                 if current_position == 'LONG':
-                    new_cycle_premium = current_entry_price * LOTE_SIZE
+                    new_cycle_premium = current_entry_price * position_size
                 else:
-                    new_cycle_premium = current_entry_price * LOTE_SIZE  # Premium received but also margin required
+                    new_cycle_premium = current_entry_price * position_size  # Premium received but also margin required
                 new_cycle_hedge_cost = abs(hedge_shares * stock_price)
                 cycle_capital = new_cycle_premium + new_cycle_hedge_cost
                 # Track starting P&L values for this new cycle
@@ -711,7 +730,7 @@ def run_gamma_scalping_strategy(df, df_options, option_type='CALL'):
                 # ================================================================
                 # CASE 4: Normal day - just rebalance hedge
                 # ================================================================
-                target_hedge = round(-position_delta * LOTE_SIZE)
+                target_hedge = round(-position_delta * position_size)
                 adjustment = target_hedge - hedge_shares
 
                 if adjustment != 0:
@@ -747,9 +766,9 @@ def run_gamma_scalping_strategy(df, df_options, option_type='CALL'):
             if current_position is not None and opt_price is not None:
                 # Calculate mark-to-market value of the portfolio
                 if current_position == 'LONG':
-                    option_mtm = opt_price * LOTE_SIZE
+                    option_mtm = opt_price * position_size
                 else:
-                    option_mtm = -opt_price * LOTE_SIZE
+                    option_mtm = -opt_price * position_size
 
                 hedge_value = hedge_shares * stock_price
                 portfolio_mtm = option_mtm + hedge_value + cash_position
@@ -784,11 +803,11 @@ def run_gamma_scalping_strategy(df, df_options, option_type='CALL'):
                     final_opt_price = max(0, current_strike - final_stock)
 
             if current_position == 'LONG':
-                option_pnl += (final_opt_price - current_entry_price) * LOTE_SIZE
+                option_pnl += (final_opt_price - current_entry_price) * position_size
             else:
-                option_pnl += (current_entry_price - final_opt_price) * LOTE_SIZE
+                option_pnl += (current_entry_price - final_opt_price) * position_size
 
-            total_commission += final_opt_price * LOTE_SIZE * COMMISSION_OPTIONS
+            total_commission += final_opt_price * position_size * COMMISSION_OPTIONS
 
             # Close hedge
             cash_position += hedge_shares * final_stock
@@ -914,6 +933,7 @@ def run_gamma_scalping_straddle(df, df_options):
         prev_date = None
         prev_stock = None
         trade_count = 0
+        position_size = 0  # Number of options (calculated dynamically per cycle)
 
         # Per-cycle tracking for correct return calculation
         cycle_returns = []  # List of returns per cycle
@@ -965,22 +985,34 @@ def run_gamma_scalping_straddle(df, df_options):
                 current_entry_date = current_date
                 current_iv = atm_call['iv'] if atm_call['iv'] and not pd.isna(atm_call['iv']) else avg_iv
 
-                # Cash flow from options (straddle = call + put)
-                straddle_premium = (call_entry_price + put_entry_price) * LOTE_SIZE
-                if current_position == 'LONG':
-                    cash_position -= straddle_premium  # Pay premium
-                else:
-                    cash_position += straddle_premium  # Receive premium
-
-                # Calculate initial delta and hedge
+                # Calculate initial delta for position sizing
                 call_delta = bs_delta_call(stock_price, current_strike, T, risk_free, current_iv)
                 put_delta = bs_delta_put(stock_price, current_strike, T, risk_free, current_iv)
                 net_delta = call_delta + put_delta  # For straddle
 
                 if current_position == 'SHORT':
-                    net_delta = -net_delta
+                    position_delta = -net_delta
+                else:
+                    position_delta = net_delta
 
-                target_hedge = round(-net_delta * LOTE_SIZE)
+                # Calculate position size based on max total exposure (premium + hedge)
+                # For straddle: exposure per option = (call + put premium) + |net_delta| * stock_price
+                straddle_unit_premium = call_entry_price + put_entry_price
+                exposure_per_option = straddle_unit_premium + abs(position_delta) * stock_price
+                max_options = int(MAX_EXPOSURE_BUDGET / exposure_per_option)
+                position_size = (max_options // LOTE_UNIT) * LOTE_UNIT
+                if position_size < LOTE_UNIT:
+                    position_size = LOTE_UNIT
+
+                # Cash flow from options (straddle = call + put)
+                straddle_premium = straddle_unit_premium * position_size
+                if current_position == 'LONG':
+                    cash_position -= straddle_premium  # Pay premium
+                else:
+                    cash_position += straddle_premium  # Receive premium
+
+                # Calculate hedge
+                target_hedge = round(-position_delta * position_size)
                 hedge_shares = target_hedge
                 cash_position -= hedge_shares * stock_price
 
@@ -1080,13 +1112,13 @@ def run_gamma_scalping_straddle(df, df_options):
             if should_roll:
                 # Close current position
                 if current_position == 'LONG':
-                    option_pnl += ((call_price - call_entry_price) + (put_price - put_entry_price)) * LOTE_SIZE
-                    cash_position += (call_price + put_price) * LOTE_SIZE
+                    option_pnl += ((call_price - call_entry_price) + (put_price - put_entry_price)) * position_size
+                    cash_position += (call_price + put_price) * position_size
                 else:
-                    option_pnl += ((call_entry_price - call_price) + (put_entry_price - put_price)) * LOTE_SIZE
-                    cash_position -= (call_price + put_price) * LOTE_SIZE
+                    option_pnl += ((call_entry_price - call_price) + (put_entry_price - put_price)) * position_size
+                    cash_position -= (call_price + put_price) * position_size
 
-                total_commission += (call_price + put_price) * LOTE_SIZE * COMMISSION_OPTIONS
+                total_commission += (call_price + put_price) * position_size * COMMISSION_OPTIONS
 
                 # Close hedge
                 cash_position += hedge_shares * stock_price
@@ -1164,13 +1196,7 @@ def run_gamma_scalping_straddle(df, df_options):
                 current_entry_date = current_date
                 current_iv = new_atm_call['iv'] if new_atm_call['iv'] and not pd.isna(new_atm_call['iv']) else avg_iv
 
-                straddle_premium = (call_entry_price + put_entry_price) * LOTE_SIZE
-                if current_position == 'LONG':
-                    cash_position -= straddle_premium
-                else:
-                    cash_position += straddle_premium
-
-                # New hedge
+                # New hedge calculation
                 new_opex_end = get_opex_end_date(target_opex, df_options)
                 new_days = (new_opex_end - current_date).days if new_opex_end else days_to_expiry
                 new_T = max(new_days, 1) / 365
@@ -1182,7 +1208,21 @@ def run_gamma_scalping_straddle(df, df_options):
                 if current_position == 'SHORT':
                     new_net_delta = -new_net_delta
 
-                target_hedge = round(-new_net_delta * LOTE_SIZE)
+                # Calculate new position size based on max total exposure (premium + hedge)
+                straddle_unit_premium = call_entry_price + put_entry_price
+                exposure_per_option = straddle_unit_premium + abs(new_net_delta) * stock_price
+                max_options = int(MAX_EXPOSURE_BUDGET / exposure_per_option)
+                position_size = (max_options // LOTE_UNIT) * LOTE_UNIT
+                if position_size < LOTE_UNIT:
+                    position_size = LOTE_UNIT
+
+                straddle_premium = straddle_unit_premium * position_size
+                if current_position == 'LONG':
+                    cash_position -= straddle_premium
+                else:
+                    cash_position += straddle_premium
+
+                target_hedge = round(-new_net_delta * position_size)
                 hedge_shares = target_hedge
                 cash_position -= hedge_shares * stock_price
 
@@ -1222,7 +1262,7 @@ def run_gamma_scalping_straddle(df, df_options):
                 trade_count += 1
             else:
                 # Normal rebalancing (no hedge_log entry needed for daily rebalances)
-                target_hedge = round(-position_delta * LOTE_SIZE)
+                target_hedge = round(-position_delta * position_size)
                 adjustment = target_hedge - hedge_shares
 
                 if adjustment != 0:
@@ -1238,9 +1278,9 @@ def run_gamma_scalping_straddle(df, df_options):
             if current_position is not None and call_price is not None and put_price is not None:
                 # Calculate mark-to-market value of the straddle
                 if current_position == 'LONG':
-                    option_mtm = (call_price + put_price) * LOTE_SIZE
+                    option_mtm = (call_price + put_price) * position_size
                 else:
-                    option_mtm = -(call_price + put_price) * LOTE_SIZE
+                    option_mtm = -(call_price + put_price) * position_size
 
                 hedge_value = hedge_shares * stock_price
                 portfolio_mtm = option_mtm + hedge_value + cash_position
@@ -1272,11 +1312,11 @@ def run_gamma_scalping_straddle(df, df_options):
                 final_put_price = max(0, current_strike - final_stock)
 
             if current_position == 'LONG':
-                option_pnl += ((final_call_price - call_entry_price) + (final_put_price - put_entry_price)) * LOTE_SIZE
+                option_pnl += ((final_call_price - call_entry_price) + (final_put_price - put_entry_price)) * position_size
             else:
-                option_pnl += ((call_entry_price - final_call_price) + (put_entry_price - final_put_price)) * LOTE_SIZE
+                option_pnl += ((call_entry_price - final_call_price) + (put_entry_price - final_put_price)) * position_size
 
-            total_commission += (final_call_price + final_put_price) * LOTE_SIZE * COMMISSION_OPTIONS
+            total_commission += (final_call_price + final_put_price) * position_size * COMMISSION_OPTIONS
             cash_position += hedge_shares * final_stock
             total_commission += abs(hedge_shares) * final_stock * COMMISSION_STOCK
 
@@ -1398,6 +1438,7 @@ def run_gamma_scalping_strangle(df, df_options):
         prev_date = None
         prev_stock = None
         trade_count = 0
+        position_size = 0  # Number of options (calculated dynamically per cycle)
 
         # Per-cycle tracking for correct return calculation
         cycle_returns = []  # List of returns per cycle
@@ -1479,21 +1520,33 @@ def run_gamma_scalping_strangle(df, df_options):
                 put_entry_price = otm_put['price']
                 current_iv = otm_call['iv'] if otm_call['iv'] and not pd.isna(otm_call['iv']) else avg_iv
 
-                strangle_premium = (call_entry_price + put_entry_price) * LOTE_SIZE
-                if current_position == 'LONG':
-                    cash_position -= strangle_premium
-                else:
-                    cash_position += strangle_premium
-
-                # Calculate initial delta and hedge
+                # Calculate initial delta for position sizing
                 call_delta = bs_delta_call(stock_price, call_strike, T, risk_free, current_iv)
                 put_delta = bs_delta_put(stock_price, put_strike, T, risk_free, current_iv)
                 net_delta = call_delta + put_delta
 
                 if current_position == 'SHORT':
-                    net_delta = -net_delta
+                    position_delta = -net_delta
+                else:
+                    position_delta = net_delta
 
-                target_hedge = round(-net_delta * LOTE_SIZE)
+                # Calculate position size based on max total exposure (premium + hedge)
+                # For strangle: exposure per option = (call + put premium) + |net_delta| * stock_price
+                strangle_unit_premium = call_entry_price + put_entry_price
+                exposure_per_option = strangle_unit_premium + abs(position_delta) * stock_price
+                max_options = int(MAX_EXPOSURE_BUDGET / exposure_per_option)
+                position_size = (max_options // LOTE_UNIT) * LOTE_UNIT
+                if position_size < LOTE_UNIT:
+                    position_size = LOTE_UNIT
+
+                strangle_premium = strangle_unit_premium * position_size
+                if current_position == 'LONG':
+                    cash_position -= strangle_premium
+                else:
+                    cash_position += strangle_premium
+
+                # Calculate hedge
+                target_hedge = round(-position_delta * position_size)
                 hedge_shares = target_hedge
                 cash_position -= hedge_shares * stock_price
 
@@ -1608,13 +1661,13 @@ def run_gamma_scalping_strangle(df, df_options):
             if should_roll:
                 # Close current position
                 if current_position == 'LONG':
-                    option_pnl += ((call_price - call_entry_price) + (put_price - put_entry_price)) * LOTE_SIZE
-                    cash_position += (call_price + put_price) * LOTE_SIZE
+                    option_pnl += ((call_price - call_entry_price) + (put_price - put_entry_price)) * position_size
+                    cash_position += (call_price + put_price) * position_size
                 else:
-                    option_pnl += ((call_entry_price - call_price) + (put_entry_price - put_price)) * LOTE_SIZE
-                    cash_position -= (call_price + put_price) * LOTE_SIZE
+                    option_pnl += ((call_entry_price - call_price) + (put_entry_price - put_price)) * position_size
+                    cash_position -= (call_price + put_price) * position_size
 
-                total_commission += (call_price + put_price) * LOTE_SIZE * COMMISSION_OPTIONS
+                total_commission += (call_price + put_price) * position_size * COMMISSION_OPTIONS
                 cash_position += hedge_shares * stock_price
                 total_commission += abs(hedge_shares) * stock_price * COMMISSION_STOCK
 
@@ -1684,13 +1737,7 @@ def run_gamma_scalping_strangle(df, df_options):
                 put_entry_price = new_put['price']
                 current_iv = new_call['iv'] if new_call['iv'] and not pd.isna(new_call['iv']) else avg_iv
 
-                strangle_premium = (call_entry_price + put_entry_price) * LOTE_SIZE
-                if current_position == 'LONG':
-                    cash_position -= strangle_premium
-                else:
-                    cash_position += strangle_premium
-
-                # New hedge
+                # New hedge calculation
                 new_opex_end = get_opex_end_date(target_opex, df_options)
                 new_days = (new_opex_end - current_date).days if new_opex_end else days_to_expiry
                 new_T = max(new_days, 1) / 365
@@ -1702,7 +1749,21 @@ def run_gamma_scalping_strangle(df, df_options):
                 if current_position == 'SHORT':
                     new_net_delta = -new_net_delta
 
-                target_hedge = round(-new_net_delta * LOTE_SIZE)
+                # Calculate new position size based on max total exposure (premium + hedge)
+                strangle_unit_premium = call_entry_price + put_entry_price
+                exposure_per_option = strangle_unit_premium + abs(new_net_delta) * stock_price
+                max_options = int(MAX_EXPOSURE_BUDGET / exposure_per_option)
+                position_size = (max_options // LOTE_UNIT) * LOTE_UNIT
+                if position_size < LOTE_UNIT:
+                    position_size = LOTE_UNIT
+
+                strangle_premium = strangle_unit_premium * position_size
+                if current_position == 'LONG':
+                    cash_position -= strangle_premium
+                else:
+                    cash_position += strangle_premium
+
+                target_hedge = round(-new_net_delta * position_size)
                 hedge_shares = target_hedge
                 cash_position -= hedge_shares * stock_price
 
@@ -1743,7 +1804,7 @@ def run_gamma_scalping_strangle(df, df_options):
                 trade_count += 1
             else:
                 # Normal rebalancing (no hedge_log entry needed for daily rebalances)
-                target_hedge = round(-position_delta * LOTE_SIZE)
+                target_hedge = round(-position_delta * position_size)
                 adjustment = target_hedge - hedge_shares
 
                 if adjustment != 0:
@@ -1759,9 +1820,9 @@ def run_gamma_scalping_strangle(df, df_options):
             if current_position is not None and call_price is not None and put_price is not None:
                 # Calculate mark-to-market value of the strangle
                 if current_position == 'LONG':
-                    option_mtm = (call_price + put_price) * LOTE_SIZE
+                    option_mtm = (call_price + put_price) * position_size
                 else:
-                    option_mtm = -(call_price + put_price) * LOTE_SIZE
+                    option_mtm = -(call_price + put_price) * position_size
 
                 hedge_value = hedge_shares * stock_price
                 portfolio_mtm = option_mtm + hedge_value + cash_position
@@ -1792,11 +1853,11 @@ def run_gamma_scalping_strangle(df, df_options):
                 final_put_price = max(0, put_strike - final_stock)
 
             if current_position == 'LONG':
-                option_pnl += ((final_call_price - call_entry_price) + (final_put_price - put_entry_price)) * LOTE_SIZE
+                option_pnl += ((final_call_price - call_entry_price) + (final_put_price - put_entry_price)) * position_size
             else:
-                option_pnl += ((call_entry_price - final_call_price) + (put_entry_price - final_put_price)) * LOTE_SIZE
+                option_pnl += ((call_entry_price - final_call_price) + (put_entry_price - final_put_price)) * position_size
 
-            total_commission += (final_call_price + final_put_price) * LOTE_SIZE * COMMISSION_OPTIONS
+            total_commission += (final_call_price + final_put_price) * position_size * COMMISSION_OPTIONS
             cash_position += hedge_shares * final_stock
             total_commission += abs(hedge_shares) * final_stock * COMMISSION_STOCK
 
@@ -1896,11 +1957,16 @@ def run_stock_strategy(df, position_type='LONG', start_date=None, end_date=None)
     entry_price = entry_row['Last_Price']
     exit_price = exit_row['Last_Price']
 
+    # Calculate position size based on max premium budget
+    # Use same budget as options strategies for fair comparison
+    # For stock, the exposure is simply the stock value (no delta hedge needed)
+    position_size = int(MAX_EXPOSURE_BUDGET / entry_price)
+
     # Calculate gross P&L
     if position_type == 'LONG':
-        gross_pnl = (exit_price - entry_price) * LOTE_SIZE
+        gross_pnl = (exit_price - entry_price) * position_size
     else:  # SHORT
-        gross_pnl = (entry_price - exit_price) * LOTE_SIZE
+        gross_pnl = (entry_price - exit_price) * position_size
 
     # Calculate financing costs (daily compounding)
     cash_position = 0
@@ -1908,12 +1974,12 @@ def run_stock_strategy(df, position_type='LONG', start_date=None, end_date=None)
 
     if position_type == 'LONG':
         # Need to borrow money to buy stock
-        cash_position = -entry_price * LOTE_SIZE
+        cash_position = -entry_price * position_size
     else:
         # SHORT sale: receive proceeds which are used as margin collateral
         # With 100% margin, proceeds = margin requirement
         # The margin collateral (= proceeds) earns the risk-free rate
-        cash_position = entry_price * LOTE_SIZE
+        cash_position = entry_price * position_size
 
     # Calculate financing day by day
     trading_dates = sorted(df_filtered['Date'].unique())
@@ -1935,7 +2001,7 @@ def run_stock_strategy(df, position_type='LONG', start_date=None, end_date=None)
         prev_date = current_date
 
     # Commission (entry + exit)
-    commission = entry_price * LOTE_SIZE * COMMISSION_STOCK * 2
+    commission = entry_price * position_size * COMMISSION_STOCK * 2
 
     # Total P&L
     total_pnl = gross_pnl + financing_pnl - commission
@@ -1944,9 +2010,9 @@ def run_stock_strategy(df, position_type='LONG', start_date=None, end_date=None)
     # LONG: Need 100% capital (no margin for buying)
     # SHORT: Need 100% margin collateral (conservative assumption)
     if position_type == 'LONG':
-        investment = entry_price * LOTE_SIZE  # 100% capital required
+        investment = entry_price * position_size  # 100% capital required
     else:
-        investment = entry_price * LOTE_SIZE * MARGIN_RATE  # 100% margin for short
+        investment = entry_price * position_size * MARGIN_RATE  # 100% margin for short
     net_return = (total_pnl / investment) * 100
 
     return pd.DataFrame([{
