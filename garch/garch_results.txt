@@ -1,0 +1,542 @@
+================================================================================
+ARCH AND GARCH MODELS FOR GGAL VOLATILITY FORECASTING
+COMPARING SIMPLE RETURNS VS LOG RETURNS
+================================================================================
+Generated on: 2026-03-24 10:01:58
+
+
+================================================================================
+SECTION 1: DATA DESCRIPTION
+================================================================================
+
+1.1 DATA SOURCE
+---------------
+File: data.dat
+Source: BYMA (Bolsas y Mercados Argentinos) daily data
+Instrument: GGAL (Grupo Financiero Galicia)
+Type: Daily closing prices and returns
+
+The data contains:
+- Date: Trading date
+- Last_Price: GGAL closing price (ARS)
+- Simple_Return: (P_t / P_{t-1}) - 1
+- Log_Return: log(P_t / P_{t-1})
+- Adj_Price: Dividend-adjusted price
+
+1.2 RETURN TYPES
+----------------
+Simple Returns:
+  Formula: r_t = (P_t / P_{t-1}) - 1
+  Properties: Directly interpretable as percentage change
+              Not additive over time
+              Bounded below at -100%
+
+Log Returns:
+  Formula: r_t = log(P_t / P_{t-1})
+  Properties: Approximately normal (better for GARCH)
+              Additive over time (r_total = sum(r_t))
+              Symmetric around zero
+              Preferred for volatility modeling
+
+
+1.3 DATA SUMMARY
+----------------
+Period: 2021-02-19 to 2025-12-18
+Total observations: 1181 trading days
+Years covered: 2021 - 2025
+
+Sample of data:
+      Date  Last_Price  Simple_Return  Log_Return
+2021-02-19      126.50            NaN         NaN
+2021-02-22      120.05      -0.050988   -0.052334
+2021-02-23      113.90      -0.051229   -0.052587
+2021-02-24      118.20       0.037752    0.037057
+2021-02-25      115.40      -0.023689   -0.023974
+
+
+================================================================================
+SECTION 2: RETURN PREPARATION AND COMPARISON
+================================================================================
+
+2.1 RETURN TRANSFORMATION
+-------------------------
+Returns converted to percentage for numerical stability:
+  Simple_Return_pct = Simple_Return × 100
+  Log_Return_pct = Log_Return × 100
+
+After cleaning (removing NaN/infinite values):
+  Observations: 1152
+
+2.2 DESCRIPTIVE STATISTICS COMPARISON
+--------------------------------------
+                    Simple Returns    Log Returns
+count               1152            1152
+mean                0.4219          0.3622
+std                 3.4637          3.4259
+min                 -20.1439        -22.4944
+25%                 -1.7491         -1.7646
+50%                 0.2665          0.2662
+75%                 2.2349          2.2103
+max                 27.7477         24.4887
+skewness            0.6300          0.2832
+excess kurtosis     5.4682          4.7202
+
+Key Observations:
+- Log returns have slightly lower mean (expected)
+- Log returns have slightly more negative skewness (more symmetric around zero)
+- Both show excess kurtosis (fat tails) - motivates ARCH/GARCH
+
+
+Generating Graph 1: Price and Returns Time Series...
+  Saved: garch_results/01_price_returns_timeseries.png
+
+Generating Graph 2: Return Distribution Analysis...
+  Saved: garch_results/02_return_distribution.png
+
+2.3 NORMALITY TESTS
+-------------------
+Jarque-Bera Test:
+                    Simple Returns    Log Returns
+Statistic           1511.4447       1084.8586
+P-value             0.000000        0.000000
+
+Decision: Both return types are NOT normally distributed (p < 0.05)
+Note: Non-normality and fat tails are common in financial data.
+      Log returns are slightly closer to normality in most cases.
+
+
+================================================================================
+SECTION 3: TESTING FOR ARCH EFFECTS
+================================================================================
+
+3.1 WHY TEST FOR ARCH EFFECTS?
+-------------------------------
+ARCH effects are present when:
+  - Volatility clusters: high volatility periods followed by high volatility
+  - Squared returns are autocorrelated
+
+If ARCH effects exist, ARCH/GARCH models are appropriate.
+
+
+Generating Graph 3: Autocorrelation Functions...
+  Saved: garch_results/03_autocorrelation_analysis.png
+
+3.2 LJUNG-BOX TEST FOR ARCH EFFECTS
+------------------------------------
+Testing autocorrelation in SQUARED returns:
+
+Simple Returns (Squared):
+      lb_stat  lb_pvalue
+10  41.123938   0.000011
+20  45.538460   0.000932
+30  60.240865   0.000861
+
+Log Returns (Squared):
+      lb_stat  lb_pvalue
+10  43.517453   0.000004
+20  48.343861   0.000381
+30  62.025504   0.000520
+
+Decision: ARCH effects detected in both return types (p < 0.05)
+          → ARCH/GARCH models are appropriate
+
+
+================================================================================
+SECTION 4: DATA SPLIT FOR MODEL VALIDATION
+================================================================================
+
+4.1 SPLIT METHODOLOGY
+---------------------
+Split ratio: 80% training / 20% testing
+
+Training set:
+  Size: 921 observations
+  Period: 2021-02-22 to 2024-12-30
+
+Testing set:
+  Size: 231 observations
+  Period: 2025-01-02 to 2025-12-18
+
+
+================================================================================
+SECTION 5: MODEL ESTIMATION - SIMPLE RETURNS
+================================================================================
+
+5.1 ARCH(1) AND GARCH(1,1) MODEL SPECIFICATIONS
+------------------------------------------------
+ARCH(1) Variance equation:
+    σ²_t = ω + α₁ · ε²_{t-1}
+
+GARCH(1,1) Variance equation:
+    σ²_t = ω + α₁ · ε²_{t-1} + β₁ · σ²_{t-1}
+
+Where:
+  - ω: baseline variance
+  - α₁: ARCH effect (shock impact)
+  - β₁: GARCH effect (persistence)
+  - α₁ + β₁: total persistence (should be < 1)
+
+
+5.2 SIMPLE RETURNS - ARCH(1) RESULTS
+-------------------------------------
+                        Zero Mean - ARCH Model Results                        
+==============================================================================
+Dep. Variable:      Simple_Return_pct   R-squared:                       0.000
+Mean Model:                 Zero Mean   Adj. R-squared:                  0.001
+Vol Model:                       ARCH   Log-Likelihood:               -2397.06
+Distribution:                  Normal   AIC:                           4798.12
+Method:            Maximum Likelihood   BIC:                           4807.77
+                                        No. Observations:                  921
+Date:                Tue, Mar 24 2026   Df Residuals:                      921
+Time:                        10:02:01   Df Model:                            0
+                             Volatility Model                             
+==========================================================================
+                 coef    std err          t      P>|t|    95.0% Conf. Int.
+--------------------------------------------------------------------------
+omega          9.0756      0.737     12.310  8.034e-35   [  7.631, 10.521]
+alpha[1]       0.1790  7.575e-02      2.363  1.813e-02 [3.052e-02,  0.327]
+==========================================================================
+
+Covariance estimator: robust
+
+Parameters:
+  ω (omega):     9.075636
+  α₁ (alpha[1]): 0.178998
+  Stationarity:  ✓ Stationary
+
+Volatility:
+  Long-run daily: 3.3248%
+  Annualized:     52.78%
+
+Model Fit:
+  Log-Likelihood: -2397.06
+  AIC:            4798.12
+  BIC:            4807.77
+
+
+5.3 SIMPLE RETURNS - GARCH(1,1) RESULTS
+----------------------------------------
+                       Zero Mean - GARCH Model Results                        
+==============================================================================
+Dep. Variable:      Simple_Return_pct   R-squared:                       0.000
+Mean Model:                 Zero Mean   Adj. R-squared:                  0.001
+Vol Model:                      GARCH   Log-Likelihood:               -2382.39
+Distribution:                  Normal   AIC:                           4770.79
+Method:            Maximum Likelihood   BIC:                           4785.26
+                                        No. Observations:                  921
+Date:                Tue, Mar 24 2026   Df Residuals:                      921
+Time:                        10:02:01   Df Model:                            0
+                             Volatility Model                             
+==========================================================================
+                 coef    std err          t      P>|t|    95.0% Conf. Int.
+--------------------------------------------------------------------------
+omega          0.7733      0.535      1.445      0.148   [ -0.275,  1.822]
+alpha[1]       0.0839  4.190e-02      2.002  4.525e-02 [1.775e-03,  0.166]
+beta[1]        0.8467  8.046e-02     10.522  6.825e-26   [  0.689,  1.004]
+==========================================================================
+
+Covariance estimator: robust
+
+Parameters:
+  ω (omega):     0.773270
+  α₁ (alpha[1]): 0.083898
+  β₁ (beta[1]):  0.846651
+  Persistence:   0.930549 (very high)
+  Stationarity:  ✓ Stationary
+  Half-life:     9.6 days
+
+Volatility:
+  Long-run daily: 3.3368%
+  Annualized:     52.97%
+
+Model Fit:
+  Log-Likelihood: -2382.39
+  AIC:            4770.79
+  BIC:            4785.26
+
+
+================================================================================
+SECTION 6: MODEL ESTIMATION - LOG RETURNS
+================================================================================
+
+6.1 LOG RETURNS - ARCH(1) RESULTS
+----------------------------------
+                        Zero Mean - ARCH Model Results                        
+==============================================================================
+Dep. Variable:         Log_Return_pct   R-squared:                       0.000
+Mean Model:                 Zero Mean   Adj. R-squared:                  0.001
+Vol Model:                       ARCH   Log-Likelihood:               -2388.17
+Distribution:                  Normal   AIC:                           4780.34
+Method:            Maximum Likelihood   BIC:                           4789.99
+                                        No. Observations:                  921
+Date:                Tue, Mar 24 2026   Df Residuals:                      921
+Time:                        10:02:01   Df Model:                            0
+                             Volatility Model                             
+==========================================================================
+                 coef    std err          t      P>|t|    95.0% Conf. Int.
+--------------------------------------------------------------------------
+omega          8.9555      0.730     12.276  1.218e-34   [  7.526, 10.385]
+alpha[1]       0.1711  7.199e-02      2.377  1.746e-02 [3.002e-02,  0.312]
+==========================================================================
+
+Covariance estimator: robust
+
+Parameters:
+  ω (omega):     8.955534
+  α₁ (alpha[1]): 0.171109
+  Stationarity:  ✓ Stationary
+
+Volatility:
+  Long-run daily: 3.2870%
+  Annualized:     52.18%
+
+Model Fit:
+  Log-Likelihood: -2388.17
+  AIC:            4780.34
+  BIC:            4789.99
+
+
+6.2 LOG RETURNS - GARCH(1,1) RESULTS
+-------------------------------------
+                       Zero Mean - GARCH Model Results                        
+==============================================================================
+Dep. Variable:         Log_Return_pct   R-squared:                       0.000
+Mean Model:                 Zero Mean   Adj. R-squared:                  0.001
+Vol Model:                      GARCH   Log-Likelihood:               -2373.47
+Distribution:                  Normal   AIC:                           4752.94
+Method:            Maximum Likelihood   BIC:                           4767.42
+                                        No. Observations:                  921
+Date:                Tue, Mar 24 2026   Df Residuals:                      921
+Time:                        10:02:01   Df Model:                            0
+                              Volatility Model                             
+===========================================================================
+                 coef    std err          t      P>|t|     95.0% Conf. Int.
+---------------------------------------------------------------------------
+omega          0.6798      0.530      1.282      0.200    [ -0.360,  1.719]
+alpha[1]       0.0764  4.124e-02      1.853  6.391e-02 [-4.418e-03,  0.157]
+beta[1]        0.8609  8.325e-02     10.341  4.582e-25    [  0.698,  1.024]
+===========================================================================
+
+Covariance estimator: robust
+
+Parameters:
+  ω (omega):     0.679846
+  α₁ (alpha[1]): 0.076404
+  β₁ (beta[1]):  0.860864
+  Persistence:   0.937268 (very high)
+  Stationarity:  ✓ Stationary
+  Half-life:     10.7 days
+
+Volatility:
+  Long-run daily: 3.2920%
+  Annualized:     52.26%
+
+Model Fit:
+  Log-Likelihood: -2373.47
+  AIC:            4752.94
+  BIC:            4767.42
+
+
+================================================================================
+SECTION 7: COMPREHENSIVE MODEL COMPARISON
+================================================================================
+
+7.1 MODEL COMPARISON TABLE
+--------------------------
+     Model Return_Type  Log_Likelihood         AIC         BIC  Persistence  Annual_Vol_%
+   ARCH(1)      Simple    -2397.059582 4798.119164 4807.770084     0.178998     52.779678
+   ARCH(1)         Log    -2388.171904 4780.343808 4789.994728     0.171109     52.179199
+GARCH(1,1)      Simple    -2382.393840 4770.787681 4785.264061     0.930549     52.969646
+GARCH(1,1)         Log    -2373.470006 4752.940013 4767.416393     0.937268     52.259198
+
+Selection criteria:
+  - Lower AIC/BIC = Better model
+  - Higher Log-Likelihood = Better fit
+
+Best model by AIC: GARCH(1,1) with Log Returns
+Best model by BIC: GARCH(1,1) with Log Returns
+
+7.2 SIMPLE VS LOG RETURNS COMPARISON
+------------------------------------
+                        Simple Returns    Log Returns    Difference
+ARCH(1) AIC             4798.12         4780.34        +17.78
+GARCH(1,1) AIC          4770.79         4752.94        +17.85
+ARCH(1) BIC             4807.77         4789.99        +17.78
+GARCH(1,1) BIC          4785.26         4767.42        +17.85
+
+Interpretation:
+  - Negative difference means Log Returns perform better
+  - Positive difference means Simple Returns perform better
+
+
+  Saved: garch_results/model_comparison.csv
+
+Generating Graph 4: Fitted Conditional Volatility...
+  Saved: garch_results/04_fitted_conditional_volatility.png
+
+Fitted volatility statistics:
+
+ARCH(1) Simple:                      ARCH(1) Log:
+  Mean: 3.2908%                     Mean: 3.2570%
+  Std:  0.4577%                      Std:  0.4276%
+  Max:  8.5133%                      Max:  7.7354%
+
+GARCH(1,1) Simple:                   GARCH(1,1) Log:
+  Mean: 3.2616%                    Mean: 3.2267%
+  Std:  0.6129%                     Std:  0.5797%
+  Max:  6.6973%                     Max:  6.1626%
+
+
+Generating Graph 5: Model Comparison...
+  Saved: garch_results/05_model_comparison.png
+
+================================================================================
+SECTION 8: OUT-OF-SAMPLE FORECASTING
+================================================================================
+
+8.1 FORECASTING METHODOLOGY
+---------------------------
+Approach: Rolling window forecast
+Test period: 2025-01-02 to 2025-12-18
+Number of forecasts: 231
+
+We will compare forecasting performance for both return types using GARCH(1,1).
+
+
+  Forecasting with Simple Returns...
+    Progress: 50/231
+    Progress: 100/231
+    Progress: 150/231
+    Progress: 200/231
+
+  Forecasting with Log Returns...
+    Progress: 50/231
+    Progress: 100/231
+    Progress: 150/231
+    Progress: 200/231
+
+  ✓ Forecasting complete!
+
+8.2 FORECAST EVALUATION METRICS
+--------------------------------
+                            Simple Returns    Log Returns
+Correlation (forecast/real) 0.0959          0.0976
+MSE (variance)              3695.6569       3022.2597
+MAE (variance)              19.7108         18.7288
+
+Interpretation:
+  - Higher correlation = better forecasting
+  - Lower MSE/MAE = more accurate forecasts
+
+Best forecasting return type: Log Returns (higher correlation)
+
+
+Generating Graph 6: Forecast vs Realized Volatility...
+  Saved: garch_results/06_forecast_vs_realized.png
+
+================================================================================
+SECTION 9: MODEL DIAGNOSTICS
+================================================================================
+
+9.1 STANDARDIZED RESIDUALS STATISTICS
+--------------------------------------
+                            Simple Returns    Log Returns
+Mean (should be ≈ 0)        0.1406          0.1265
+Std Dev (should be ≈ 1)     0.9915          0.9934
+Skewness                    0.2969          0.1359
+Excess Kurtosis             1.6914          1.6491
+
+
+Generating Graph 7: Model Diagnostics...
+  Saved: garch_results/07_model_diagnostics.png
+
+9.2 LJUNG-BOX TESTS ON SQUARED RESIDUALS
+-----------------------------------------
+Simple Returns GARCH(1,1):
+      lb_stat  lb_pvalue
+10   6.988038   0.726574
+20  15.058163   0.773070
+30  21.827103   0.860259
+
+Log Returns GARCH(1,1):
+      lb_stat  lb_pvalue
+10   6.229225   0.795651
+20  15.403708   0.752860
+30  21.537151   0.870344
+
+Interpretation (p > 0.05 means no remaining ARCH effects):
+  Simple Returns: ✓ No remaining ARCH effects
+  Log Returns:    ✓ No remaining ARCH effects
+
+
+================================================================================
+SECTION 10: FINAL SUMMARY
+================================================================================
+
+10.1 COMPREHENSIVE PARAMETER ESTIMATES
+---------------------------------------
+     Model Return_Type    omega   alpha1    beta1  persistence  half_life_days  long_run_vol_%  annual_vol_%         AIC         BIC  Log_Likelihood
+   ARCH(1)      Simple 9.075636 0.178998      NaN     0.178998             NaN        3.324807     52.779678 4798.119164 4807.770084    -2397.059582
+   ARCH(1)         Log 8.955534 0.171109      NaN     0.171109             NaN        3.286981     52.179199 4780.343808 4789.994728    -2388.171904
+GARCH(1,1)      Simple 0.773270 0.083898 0.846651     0.930549        9.629663        3.336774     52.969646 4770.787681 4785.264061    -2382.393840
+GARCH(1,1)         Log 0.679846 0.076404 0.860864     0.937268       10.699110        3.292020     52.259198 4752.940013 4767.416393    -2373.470006
+
+
+  Saved: garch_results/parameters_summary.csv
+
+10.2 KEY FINDINGS
+-----------------
+Data Summary:
+  - Sample: 1152 daily returns
+  - Period: 2021-02-22 to 2025-12-18
+  - Simple Returns: mean=0.4219%, std=3.4637%
+  - Log Returns:    mean=0.3622%, std=3.4259%
+
+Return Type Comparison:
+  - Log returns have slightly lower mean and slightly more symmetric distribution
+  - Both show significant excess kurtosis (fat tails)
+  - ARCH effects present in both return types
+
+Model Selection:
+  Best model by AIC: GARCH(1,1) with Log Returns
+    - AIC: 4752.94
+    - Persistence: 0.9373
+    - Annualized Volatility: 52.26%
+
+GARCH(1,1) Comparison:
+                        Simple Returns    Log Returns
+  AIC                   4770.79         4752.94
+  Persistence           0.9305          0.9373
+  Half-life (days)      9.6             10.7
+  Annualized Vol        52.97          % 52.26%
+
+Forecasting Performance:
+  Simple Returns correlation: 0.0959
+  Log Returns correlation:    0.0976
+  Better forecasting: Log Returns
+
+Recommendation:
+  Log Returns are preferred for GARCH modeling due to:
+    1. More symmetric distribution
+    2. Additive over time
+    3. Standard in academic literature
+    4. Better forecasting performance
+    5. Lower AIC (better model fit)
+
+10.3 FILES GENERATED
+--------------------
+  - garch_results.txt (this report)
+  - garch_results/01_price_returns_timeseries.png
+  - garch_results/02_return_distribution.png
+  - garch_results/03_autocorrelation_analysis.png
+  - garch_results/04_fitted_conditional_volatility.png
+  - garch_results/05_model_comparison.png
+  - garch_results/06_forecast_vs_realized.png
+  - garch_results/07_model_diagnostics.png
+  - garch_results/model_comparison.csv
+  - garch_results/parameters_summary.csv
+
+
+================================================================================
+ANALYSIS COMPLETE
+================================================================================
